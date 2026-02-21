@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { parseAskcodexRawCommand } from "../index.ts";
+import { parseAskcodexRawCommand, validateAskcodexIsolationConfig } from "../index.ts";
 
 test("parseAskcodexRawCommand maps canonical commands", () => {
   assert.deepEqual(parseAskcodexRawCommand(""), { action: "help" });
@@ -33,4 +33,23 @@ test("parseAskcodexRawCommand defaults to send for free-form prompts", () => {
     action: "send",
     message: "new parser strategy",
   });
+});
+
+test("validateAskcodexIsolationConfig requires explicit isolated codexHome/defaultCwd", () => {
+  const missing = validateAskcodexIsolationConfig({});
+  assert.equal(missing.ok, false);
+  assert.match(missing.error, /codexHome/);
+
+  const defaultHome = validateAskcodexIsolationConfig({
+    codexHome: "~/.cache/askcodex-codex-home",
+    defaultCwd: "/tmp/askcodex-workspace",
+  });
+  assert.equal(defaultHome.ok, false);
+  assert.match(defaultHome.error, /shared default/);
+
+  const valid = validateAskcodexIsolationConfig({
+    codexHome: "/tmp/askcodex-home",
+    defaultCwd: "/tmp/askcodex-workspace",
+  });
+  assert.deepEqual(valid, { ok: true });
 });

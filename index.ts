@@ -32,6 +32,10 @@ type PluginConfig = {
   keepPty?: boolean;
 };
 
+type PluginConfigIsolationCheck =
+  | { ok: true }
+  | { ok: false; error: string };
+
 type ResolvedPluginConfig = {
   deliveryMode: "outbound" | "log" | "file";
   deliveryFile: string;
@@ -133,6 +137,65 @@ function resolvePluginConfig(api: any): ResolvedPluginConfig {
     codexBin,
     keepPty,
   };
+}
+
+function isAbsoluteOrHomePath(value: string): boolean {
+  return value.startsWith("/") || value === "~" || value.startsWith("~/");
+}
+
+export function validateAskcodexIsolationConfig(raw: PluginConfig | null | undefined): PluginConfigIsolationCheck {
+  const codexHomeRaw = typeof raw?.codexHome === "string" ? raw.codexHome.trim() : "";
+  const defaultCwdRaw = typeof raw?.defaultCwd === "string" ? raw.defaultCwd.trim() : "";
+
+  if (!codexHomeRaw) {
+    return {
+      ok: false,
+      error:
+        "askcodex requires a dedicated codexHome. Set plugins.entries.askcodex.config.codexHome to a separate absolute directory (for session/config files), then restart.",
+    };
+  }
+  if (!defaultCwdRaw) {
+    return {
+      ok: false,
+      error:
+        "askcodex requires a dedicated defaultCwd. Set plugins.entries.askcodex.config.defaultCwd to a separate absolute workspace directory, then restart.",
+    };
+  }
+  if (!isAbsoluteOrHomePath(codexHomeRaw)) {
+    return {
+      ok: false,
+      error:
+        `askcodex codexHome must be an absolute path (or ~/...). Received: ${codexHomeRaw}`,
+    };
+  }
+  if (!isAbsoluteOrHomePath(defaultCwdRaw)) {
+    return {
+      ok: false,
+      error:
+        `askcodex defaultCwd must be an absolute path (or ~/...). Received: ${defaultCwdRaw}`,
+    };
+  }
+
+  const codexHomeResolved = resolveCodexHome(codexHomeRaw);
+  if (codexHomeResolved === DEFAULT_CODEX_HOME) {
+    return {
+      ok: false,
+      error:
+        `askcodex codexHome must not use the shared default (${DEFAULT_CODEX_HOME}). Configure a dedicated per-environment codexHome path, then restart.`,
+    };
+  }
+
+  const defaultCwdResolved = resolveOptionalPath(defaultCwdRaw) ?? path.resolve(defaultCwdRaw);
+  const homeResolved = path.resolve(homedir());
+  if (defaultCwdResolved === homeResolved) {
+    return {
+      ok: false,
+      error:
+        "askcodex defaultCwd must not be your home directory. Configure a dedicated workspace directory for askcodex, then restart.",
+    };
+  }
+
+  return { ok: true };
 }
 
 function getPluginCfg(): ResolvedPluginConfig {
@@ -2415,6 +2478,11 @@ export default {
   description: "Run Codex per chat: discover a Codex session id via PTY, then submit prompts by spawning `codex resume --no-alt-screen <id> \"<prompt>\"` and deliver the final assistant message back to chat.",
 
   register: (api: any) => {
+    const isolation = validateAskcodexIsolationConfig((api?.pluginConfig ?? {}) as PluginConfig);
+    if (!isolation.ok) {
+      throw new Error(isolation.error);
+    }
+
     pluginApi = api;
     pluginCfg = resolvePluginConfig(api);
     pluginLogger = api?.logger ?? null;

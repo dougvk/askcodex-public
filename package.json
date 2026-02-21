@@ -1,0 +1,39 @@
+{
+  "name": "@dougvk/askcodex",
+  "version": "0.1.0",
+  "description": "OpenClaw askcodex plugin: per-chat Codex PTY sessions with handoff/resume/reset/new workflow.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "askcodex",
+    "codex"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "lib.js",
+    "openclaw.plugin.json",
+    "clawdbot.plugin.json",
+    "README.md",
+    "PUBLISHING.md"
+  ],
+  "scripts": {
+    "test": "tsx --test test/*.test.js",
+    "pack:check": "npm pack --dry-run"
+  },
+  "dependencies": {
+    "@lydell/node-pty": "1.2.0-beta.3"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6"
+  },
+  "publishConfig": {
+    "access": "restricted"
+  }
+}

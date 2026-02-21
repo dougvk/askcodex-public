@@ -1,0 +1,54 @@
+{
+  "id": "askcodex",
+  "name": "askcodex",
+  "description": "Run Codex per chat via a long-running PTY session.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "deliveryMode": {
+        "type": "string",
+        "description": "How to deliver Codex output: outbound|log|file",
+        "enum": ["outbound", "log", "file"]
+      },
+      "deliveryFile": {
+        "type": "string",
+        "description": "When deliveryMode=file, append output to this path"
+      },
+      "codexHome": {
+        "type": "string",
+        "description": "Override CODEX_HOME for the spawned Codex process"
+      },
+      "defaultCwd": {
+        "type": "string",
+        "description": "Default working directory for askcodex sessions when no cwd is provided"
+      },
+      "sharedConfigDir": {
+        "type": "string",
+        "description": "Canonical config directory used to resolve relative agents.*.config_file entries"
+      },
+      "forceAbsoluteAgentConfig": {
+        "type": "boolean",
+        "description": "If true, pass absolute agents.*.config_file overrides when launching Codex"
+      },
+      "codexBin": {
+        "type": "string",
+        "description": "Override path to the codex binary"
+      },
+      "keepPty": {
+        "type": "boolean",
+        "description": "If true, keep the PTY session running after sends"
+      }
+    }
+  },
+  "uiHints": {
+    "deliveryMode": { "label": "Delivery mode", "advanced": true },
+    "deliveryFile": { "label": "Delivery file", "advanced": true },
+    "codexHome": { "label": "CODEX_HOME", "advanced": true },
+    "defaultCwd": { "label": "Default cwd", "advanced": true },
+    "sharedConfigDir": { "label": "Shared config dir", "advanced": true },
+    "forceAbsoluteAgentConfig": { "label": "Absolute agent config", "advanced": true },
+    "codexBin": { "label": "codex binary", "advanced": true },
+    "keepPty": { "label": "Keep PTY", "advanced": true }
+  }
+}

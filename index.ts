@@ -140,15 +140,14 @@ function getPluginCfg(): ResolvedPluginConfig {
 }
 
 type AskcodexAction =
-  | "start"
+  | "help"
   | "new"
   | "send"
-  | "slash"
   | "status"
-  | "kill"
+  | "stop"
+  | "handoff"
   | "resume"
-  | "list"
-  | "ensure";
+  | "reset";
 
 const AskcodexToolSchema = {
   type: "object",
@@ -157,34 +156,81 @@ const AskcodexToolSchema = {
   properties: {
     action: {
       type: "string",
-      description: "Action: start|new|send|slash|status|kill|resume|list|ensure",
+      description: "Action: help|new|send|status|stop|handoff|resume|reset",
     },
     cwd: {
       type: "string",
-      description: "Absolute path for action=ensure or action=start/new. Optional when action=start/new.",
+      description: "Absolute path for action=new (optional).",
     },
     message: {
       type: "string",
-      description: "Prompt/message to send to Codex (for action=send or action=slash).",
-    },
-    outputLines: {
-      type: "number",
-      description: "For status: number of lines to return (default 20)",
-    },
-    outputMaxChars: {
-      type: "number",
-      description: "For status: max chars to return (default 5000)",
-    },
-    drain: {
-      type: "boolean",
-      description: "For status: if true, return only new output since last status call",
-    },
-    quietMs: {
-      type: "number",
-      description: "Quiet threshold after send to consider turn complete (default 5000)",
+      description: "Prompt/message to send to Codex (for action=send).",
     },
   },
 };
+
+const REMOVED_ASKCODEX_COMMANDS = new Set([
+  "start",
+  "slash",
+  "kill",
+  "list",
+  "ensure",
+  "info",
+]);
+
+const REMOVED_ASKCODEX_ACTIONS = new Set(["start", "slash", "kill", "list", "ensure"]);
+
+function renderAskcodexHelpText(): string {
+  return [
+    "askcodex",
+    "",
+    "Codex CLI in a per-chat PTY session (no RPC, no tmux).",
+    "",
+    "Commands:",
+    "- /askcodex help",
+    "- /askcodex status",
+    "- /askcodex new [abs path]",
+    "- /askcodex <prompt>",
+    "- /askcodex stop",
+    "- /askcodex reset",
+    "- /askcodex handoff",
+    "- /askcodex resume",
+    "",
+    "Notes:",
+    "- /askcodex new archives any previous session and starts fresh.",
+    "- /askcodex reset keeps the same Codex session id when available, and restarts runtime state.",
+  ].join("\n");
+}
+
+export function parseAskcodexRawCommand(rawCommand: string):
+  | { action: "help" | "status" | "new" | "stop" | "handoff" | "resume" | "reset" }
+  | { action: "new"; cwd: string }
+  | { action: "send"; message: string }
+  | { error: string } {
+  const trimmed = rawCommand.trim();
+  if (!trimmed) return { action: "help" };
+
+  const firstSpace = trimmed.search(/\s/);
+  const verb = (firstSpace < 0 ? trimmed : trimmed.slice(0, firstSpace)).toLowerCase();
+  const rest = firstSpace < 0 ? "" : trimmed.slice(firstSpace + 1).trim();
+
+  if (REMOVED_ASKCODEX_COMMANDS.has(verb)) {
+    return { error: `Unknown /askcodex command: ${verb}. Run /askcodex help.` };
+  }
+
+  if (verb === "help" && !rest) return { action: "help" };
+  if (verb === "status" && !rest) return { action: "status" };
+  if (verb === "stop" && !rest) return { action: "stop" };
+  if (verb === "handoff" && !rest) return { action: "handoff" };
+  if (verb === "resume" && !rest) return { action: "resume" };
+  if (verb === "reset" && !rest) return { action: "reset" };
+  if (verb === "new") {
+    if (!rest) return { action: "new" };
+    if (rest.startsWith("/")) return { action: "new", cwd: rest };
+  }
+
+  return { action: "send", message: trimmed };
+}
 
 function jsonResult(payload: unknown) {
   return {
@@ -388,12 +434,38 @@ function resolveAskcodexDir(agentRootDir: string): string {
   return path.join(agentRootDir, "askcodex");
 }
 
+function resolveAskcodexArchiveDir(agentRootDir: string): string {
+  return path.join(resolveAskcodexDir(agentRootDir), "archive");
+}
+
 function shortHash(text: string): string {
   return crypto.createHash("sha256").update(text).digest("hex").slice(0, 16);
 }
 
 function resolveRecordPath(agentRootDir: string, sessionKey: string): string {
   return path.join(resolveAskcodexDir(agentRootDir), `${shortHash(sessionKey)}.json`);
+}
+
+async function archiveAskcodexRecord(params: {
+  agentRootDir: string;
+  sessionKey: string;
+  record: AskcodexRecordV1;
+  reason: "new";
+}): Promise<string> {
+  const archiveDir = resolveAskcodexArchiveDir(params.agentRootDir);
+  await fs.mkdir(archiveDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const archivePath = path.join(
+    archiveDir,
+    `${shortHash(params.sessionKey)}-${stamp}-${params.reason}.json`,
+  );
+  await writeJsonAtomic(archivePath, {
+    archivedAt: Date.now(),
+    sessionKey: params.sessionKey,
+    reason: params.reason,
+    record: params.record,
+  });
+  return archivePath;
 }
 
 async function writeJsonAtomic(filePath: string, value: unknown) {
@@ -2360,73 +2432,40 @@ export default {
         name: "askcodex",
         label: "askcodex",
         description:
-          "Manage a per-chat Codex session. start discovers a session id; new forces a fresh session; send spawns `codex resume --no-alt-screen <id> \"<prompt>\"` and delivers the final assistant message; status/kill/resume/list/ensure are helpers.",
+          "Manage a per-chat Codex PTY session. Commands: help, status, new, send, stop, reset, handoff, resume.",
         parameters: AskcodexToolSchema,
 
         execute: async (_toolCallId: string, args: any) => {
           const params = (args ?? {}) as Record<string, unknown>;
 
-          // Support upstream skill-command tool dispatch payload:
-          // { command: "<raw args>", commandName: "<slash command>", skillName: "<skill name>" }
-          // while keeping backward compatibility with the existing structured tool schema.
           const rawCommand = typeof params.command === "string" ? params.command.trim() : "";
+          const invokedViaCommandDispatch =
+            typeof params.commandName === "string" || typeof params.skillName === "string";
+          if (invokedViaCommandDispatch && !rawCommand && params.action === undefined) {
+            params.action = "help";
+          }
           if (rawCommand.length > 0 && params.action === undefined) {
-            const lower = rawCommand.toLowerCase();
-
-            if (/^(info|help)\b/.test(lower)) {
-              return textResult(
-                [
-                  "askcodex",
-                  "",
-                  "Codex CLI in a per-chat PTY session (no RPC, no tmux).",
-                  "",
-                  "Commands:",
-                  "- /askcodex start",
-                  "- /askcodex new [abs path]     (force a brand-new Codex session)",
-                  "- /askcodex ensure [abs path]  (default: configured default cwd)",
-                  "- /askcodex <prompt>",
-                  "- /askcodex slash <command>   (example: /askcodex slash /status)",
-                  "- /askcodex status",
-                  "- /askcodex resume",
-                  "- /askcodex kill",
-                  "",
-                  "Notes:",
-                  "- Session id is discovered via /status inside Codex.",
-                  "- Completion is heuristic: when output goes quiet for a few seconds.",
-                ].join("\n"),
-              );
+            const parsed = parseAskcodexRawCommand(rawCommand);
+            if ("error" in parsed) {
+              return textResult(parsed.error, { ok: false, error: "unknown_command" });
             }
-
-            if (/^start\b/.test(lower)) {
-              params.action = "start";
-            } else if (/^new\b/.test(lower)) {
-              const cwd = rawCommand.replace(/^new\b\s*/i, "").trim();
-              params.action = "new";
-              if (cwd) params.cwd = cwd;
-            } else if (/^ensure\b/.test(lower)) {
-              const cwd = rawCommand.replace(/^ensure\b\s*/i, "").trim();
-              params.action = "ensure";
-              if (cwd) params.cwd = cwd;
-            } else if (/^status\b/.test(lower)) {
-              params.action = "status";
-            } else if (/^resume\b/.test(lower)) {
-              params.action = "resume";
-            } else if (/^(kill|stop)\b/.test(lower)) {
-              params.action = "kill";
-            } else if (/^list\b/.test(lower)) {
-              params.action = "list";
-            } else if (/^slash\b/.test(lower)) {
-              const cmd = rawCommand.replace(/^slash\b\s*/i, "").trim();
-              params.action = "slash";
-              params.message = cmd;
-            } else {
-              params.action = "send";
-              params.message = rawCommand;
-            }
+            params.action = parsed.action;
+            if ("cwd" in parsed) params.cwd = parsed.cwd;
+            if ("message" in parsed) params.message = parsed.message;
           }
 
           const action = String((params as any)?.action ?? "").trim().toLowerCase() as AskcodexAction;
-          const quietMs = clampInt((params as any)?.quietMs, 5000, 1000, 30000);
+          const quietMs = 5000;
+
+          if (REMOVED_ASKCODEX_ACTIONS.has(action)) {
+            return textResult(`Unknown /askcodex command: ${action}. Run /askcodex help.`, {
+              ok: false,
+              error: "unknown_command",
+            });
+          }
+          if (action === "help") {
+            return textResult(renderAskcodexHelpText(), { ok: true, action: "help" });
+          }
 
           const sessionKey = typeof ctx.sessionKey === "string" ? ctx.sessionKey.trim() : "";
           if (!sessionKey) return jsonResult({ ok: false, error: "askcodex requires a chat sessionKey" });
@@ -2526,11 +2565,16 @@ export default {
               );
             }
 
+            const recordPathBefore = resolveRecordPath(agentRootDir, normalizedSessionKey);
+            const existingBefore = await readJsonFile<AskcodexRecordV1>(recordPathBefore);
             const { record, recordPath } = await loadOrInitRecord({
               agentId,
               agentRootDir,
               sessionKey: normalizedSessionKey,
             });
+            const previousRecordSnapshot: AskcodexRecordV1 | null = existingBefore
+              ? (JSON.parse(JSON.stringify(record)) as AskcodexRecordV1)
+              : null;
 
             const existing = getActive(normalizedSessionKey);
             let replacedPid: number | null = null;
@@ -2547,6 +2591,15 @@ export default {
               clearTimers(existing);
               sessions.delete(normalizedSessionKey);
             }
+
+            const archivePath = previousRecordSnapshot
+              ? await archiveAskcodexRecord({
+                agentRootDir,
+                sessionKey: normalizedSessionKey,
+                record: previousRecordSnapshot,
+                reason: "new",
+              })
+              : null;
 
             // Force a brand-new Codex session for this chat, disregarding any previous session id.
             record.codex.cwd = resolvedCwd;
@@ -2588,16 +2641,18 @@ export default {
                 pid: session.pty.pid,
                 replacedPid,
                 codexSessionId: session.record.codex.sessionId ?? null,
+                archivedPrevious: Boolean(previousRecordSnapshot),
+                archivePath,
               },
             );
           }
 
-          if (action === "resume") {
+          if (action === "handoff") {
             const { record } = await loadOrInitRecord({ agentId, agentRootDir, sessionKey: normalizedSessionKey });
             if (!record.codex.sessionId) {
-              return textResult("No stored Codex session id for this chat. Start a new session with /askcodex start.", {
+              return textResult("No stored Codex session id for this chat. Start one with /askcodex new [abs path].", {
                 ok: false,
-                action: "resume",
+                action: "handoff",
                 error: "missing_session_id",
               });
             }
@@ -2605,45 +2660,25 @@ export default {
             const codexHomeOverride = resolveCodexHomeOverride();
             const prefix = codexHomeOverride ? `CODEX_HOME=${codexHomeOverride} ` : "";
             return textResult(
-              `To resume this session interactively on this machine (YOLO mode):\n\n${prefix}codex resume --yolo ${record.codex.sessionId}`,
-              { ok: true, action: "resume", codexSessionId: record.codex.sessionId, codexHome: codexHomeOverride || null },
+              `To hand off this session interactively on this machine (YOLO mode):\n\n${prefix}codex resume --yolo ${record.codex.sessionId}`,
+              { ok: true, action: "handoff", codexSessionId: record.codex.sessionId, codexHome: codexHomeOverride || null },
             );
           }
 
-          if (action === "ensure") {
-            const requestCwd = explicitCwd;
-            let resolvedCwd: string;
-            try {
-              resolvedCwd = await resolveAskcodexWorkingDir(requestCwd || undefined);
-            } catch (error) {
-              return textResult(
-                `Invalid /askcodex ensure cwd: ${String(error)}`,
-                { ok: false, action: "ensure", error: "invalid_cwd" },
-              );
-            }
-
+          if (action === "resume") {
             const { record, recordPath } = await loadOrInitRecord({
               agentId,
               agentRootDir,
               sessionKey: normalizedSessionKey,
             });
-            if (record.codex.cwd !== resolvedCwd) {
-              record.codex.cwd = resolvedCwd;
-              await writeJsonAtomic(recordPath, record);
-            }
+            const resolvedCwd = await resolveSessionWorkdir({ record, explicitCwd: "" });
 
             const existing = getActive(normalizedSessionKey);
             if (existing && !existing.exited) {
-              if (existing.cwd !== resolvedCwd && (existing.record.pending?.turnId || existing.pendingTurnId)) {
-                return textResult(
-                  "Codex is busy with a previous request. Finish the current turn, then run /askcodex ensure again.",
-                  { ok: false, action: "ensure", error: "busy" },
-                );
-              }
               if (existing.cwd === resolvedCwd) {
                 return textResult(
-                  `Ensured Codex is running in ${existing.cwd}. PTY PID=${existing.pty.pid}`,
-                  { ok: true, action: "ensure", pid: existing.pty.pid, codexSessionId: existing.record.codex.sessionId ?? null },
+                  `Codex session is already active in ${existing.cwd}. PTY PID=${existing.pty.pid}`,
+                  { ok: true, action: "resume", pid: existing.pty.pid, codexSessionId: existing.record.codex.sessionId ?? null },
                 );
               }
             }
@@ -2654,6 +2689,11 @@ export default {
               sessions.delete(normalizeSessionKey(sessionKey));
             }
 
+            record.pending = undefined;
+            record.lastError = undefined;
+            record.updatedAt = nowMs();
+            await writeJsonAtomicLocked(recordPath, record);
+
             const session = await ensureActivePty({
               sessionKey: normalizedSessionKey,
               agentId,
@@ -2663,16 +2703,66 @@ export default {
             });
 
             return textResult(
-              `Ensured Codex session. PTY PID=${session.pty.pid} in ${resolvedCwd}`,
-              { ok: true, action: "ensure", pid: session.pty.pid, codexSessionId: session.record.codex.sessionId ?? null },
+              `Resumed Codex automation. PTY PID=${session.pty.pid} in ${resolvedCwd}`,
+              { ok: true, action: "resume", pid: session.pty.pid, codexSessionId: session.record.codex.sessionId ?? null },
             );
           }
 
-          if (action === "kill") {
+          if (action === "reset") {
+            const { record, recordPath } = await loadOrInitRecord({
+              agentId,
+              agentRootDir,
+              sessionKey: normalizedSessionKey,
+            });
+            const resolvedCwd = await resolveSessionWorkdir({ record, explicitCwd: "" });
+
+            const existing = getActive(normalizedSessionKey);
+            if (existing) {
+              try {
+                existing.pty.kill("SIGTERM");
+              } catch {
+                // ignore
+              }
+              clearTimers(existing);
+              sessions.delete(normalizedSessionKey);
+            }
+
+            record.pending = undefined;
+            record.lastError = undefined;
+            record.updatedAt = nowMs();
+            await writeJsonAtomicLocked(recordPath, record);
+
+            const session = await ensureActivePty({
+              sessionKey: normalizedSessionKey,
+              agentId,
+              agentRootDir,
+              cwd: resolvedCwd,
+              quietMs,
+            });
+
+            try {
+              await ensureCodexJsonlReady(session);
+              await probeCodexSessionIdFromFilesystem(session);
+            } catch {
+              // ignore
+            }
+
+            return textResult(
+              `Reset Codex runtime. PTY PID=${session.pty.pid}${session.record.codex.sessionId ? `\nSession: ${session.record.codex.sessionId}` : ""}`,
+              {
+                ok: true,
+                action: "reset",
+                pid: session.pty.pid,
+                codexSessionId: session.record.codex.sessionId ?? null,
+              },
+            );
+          }
+
+          if (action === "stop") {
             const key = normalizeSessionKey(sessionKey);
             const session = getActive(sessionKey);
             if (!session) {
-              return textResult("No active Codex PTY for this chat.", { ok: true, action: "kill", existed: false });
+              return textResult("No active Codex PTY for this chat.", { ok: true, action: "stop", existed: false });
             }
             try {
               session.pty.kill("SIGTERM");
@@ -2681,20 +2771,17 @@ export default {
             }
             clearTimers(session);
             sessions.delete(key);
-            return textResult("Killed active Codex PTY session.", { ok: true, action: "kill", existed: true });
+            return textResult("Stopped active Codex PTY session.", { ok: true, action: "stop", existed: true });
           }
 
           if (action === "status") {
-            const outputLines = clampInt(args?.outputLines, 20, 1, 200);
-            const outputMaxChars = clampInt(args?.outputMaxChars, 5000, 200, 50000);
-            const drain = args?.drain === true;
             const res = await actionStatus({
               sessionKey: normalizedSessionKey,
               agentId,
               agentRootDir,
-              outputLines,
-              outputMaxChars,
-              drain,
+              outputLines: 20,
+              outputMaxChars: 5000,
+              drain: false,
             });
             const text =
               res.output && String(res.output).trim()
@@ -2703,21 +2790,13 @@ export default {
             return textResult(text, res);
           }
 
-          if (action === "send" || action === "slash") {
+          if (action === "send") {
             let message = String(args?.message ?? "").trim();
             if (!message) {
-              return textResult(
-                action === "slash"
-                  ? "Missing slash command. Example: /askcodex slash /status"
-                  : "Missing message. Example: /askcodex <prompt>",
-                { ok: false, error: "missing_message" },
-              );
-            }
-
-            // For slash commands, normalize to start with '/'.
-            if (action === "slash") {
-              const trimmed = message.trim();
-              message = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+              return textResult("Missing message. Example: /askcodex <prompt>", {
+                ok: false,
+                error: "missing_message",
+              });
             }
 
             // Persist delivery hint so delivery can always route back.
@@ -2784,7 +2863,7 @@ export default {
 
             const turnId = crypto.randomUUID();
             const sentAt = nowMs();
-            const pendingMode = action === "slash" ? "screen" : "jsonl";
+            const pendingMode = "jsonl";
             const pendingSnapshot = normalizePendingTurn(
               normalizedSessionKey,
               {

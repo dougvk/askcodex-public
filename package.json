@@ -1,6 +1,6 @@
 {
   "name": "@dougvk/askcodex",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "OpenClaw askcodex plugin: per-chat Codex PTY sessions with handoff/resume/reset/new workflow.",
   "type": "module",
   "license": "UNLICENSED",

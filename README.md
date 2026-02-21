@@ -13,12 +13,16 @@ OpenClaw plugin that runs one Codex PTY runtime per chat session and delivers co
 - `/askcodex handoff`
 - `/askcodex resume`
 
-## Behavior
+## Command Behavior
 
-- `new` archives prior session state and starts a fresh Codex session.
-- `reset` keeps session identity when available and restarts runtime state.
-- `status` returns a single PTY-oriented status view.
-- Old aliases (`ensure`, `start`, `slash`, `info`, `list`, `kill`) are intentionally removed.
+- `/askcodex help`: shows command usage for this plugin.
+- `/askcodex status`: returns a single PTY-oriented status view.
+- `/askcodex new [abs path]`: archives prior session state and starts a fresh Codex session.
+- `/askcodex <prompt>`: sends a prompt to the active Codex PTY; if a turn is already running, it returns a busy error.
+- `/askcodex stop`: stops the active Codex PTY for this chat.
+- `/askcodex reset`: keeps session identity when available and restarts runtime state.
+- `/askcodex handoff`: returns a local `codex resume --yolo <session-id>` command for interactive handoff.
+- `/askcodex resume`: restarts Codex automation for this chat in the stored workspace/session context.
 
 ## Requirements
 
